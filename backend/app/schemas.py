@@ -1,0 +1,402 @@
+import re
+import uuid
+from datetime import date, datetime, time
+from typing import Annotated, Literal
+from zoneinfo import available_timezones
+
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+
+class SeedModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class HairLengthSeed(SeedModel):
+    slug: str
+    label: str
+    description: str
+    requires_consultation: bool
+
+
+class ServiceOptionSeed(SeedModel):
+    hair_length: str
+    duration_minutes: int = Field(gt=0)
+    price_cents: int = Field(ge=0)
+
+
+class ServiceSeed(SeedModel):
+    slug: str
+    name: str
+    description: str
+    options: list[ServiceOptionSeed]
+
+
+class HoursSeed(SeedModel):
+    weekday: int = Field(ge=0, le=6)
+    opens_at: time
+    closes_at: time
+
+
+class FaqSeed(SeedModel):
+    slug: str
+    question: str
+    answer: str
+
+
+class StylistPeriodSeed(SeedModel):
+    weekday: int = Field(ge=0, le=6)
+    starts_at: time
+    ends_at: time
+
+
+class StylistSeed(SeedModel):
+    slug: str
+    display_name: str
+    hours: list[StylistPeriodSeed]
+    breaks: list[StylistPeriodSeed]
+
+
+class BusinessSeed(SeedModel):
+    slug: str
+    name: str
+    tagline: str
+    about: str
+    timezone: str
+    contact_email: str
+    contact_phone: str
+    address: str
+    is_demo: bool
+    slot_increment_minutes: int = Field(gt=0)
+    buffer_minutes: int = Field(ge=0)
+    min_notice_minutes: int = Field(ge=0)
+    booking_horizon_days: int = Field(gt=0)
+    hours: list[HoursSeed]
+    stylists: list[StylistSeed]
+    hair_lengths: list[HairLengthSeed]
+    services: list[ServiceSeed]
+    faqs: list[FaqSeed]
+
+    @field_validator("timezone")
+    @classmethod
+    def known_timezone(cls, value: str) -> str:
+        if value not in available_timezones():
+            raise ValueError(f"unknown timezone: {value}")
+        return value
+
+    @model_validator(mode="after")
+    def options_reference_known_lengths(self) -> "BusinessSeed":
+        hair_lengths = {hair_length.slug: hair_length for hair_length in self.hair_lengths}
+        for service in self.services:
+            for option in service.options:
+                hair_length = hair_lengths.get(option.hair_length)
+                if hair_length is None:
+                    raise ValueError(f"{service.slug}: unknown hair length {option.hair_length}")
+                if hair_length.requires_consultation:
+                    raise ValueError(f"{service.slug}: {option.hair_length} needs a consultation")
+        return self
+
+
+class HoursPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    weekday: int
+    opens_at: time
+    closes_at: time
+
+
+class BusinessPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    tagline: str
+    about: str
+    timezone: str
+    contact_email: str
+    contact_phone: str
+    address: str
+    is_demo: bool
+    hours: list[HoursPublic]
+
+
+class HairLengthPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    slug: str
+    label: str
+    description: str
+    requires_consultation: bool
+
+
+class ServiceOptionPublic(BaseModel):
+    hair_length: str
+    duration_minutes: int
+    price_cents: int
+
+
+class ServicePublic(BaseModel):
+    slug: str
+    name: str
+    description: str
+    options: list[ServiceOptionPublic]
+
+
+class CatalogPublic(BaseModel):
+    hair_lengths: list[HairLengthPublic]
+    services: list[ServicePublic]
+
+
+class FaqPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    slug: str
+    question: str
+    answer: str
+
+
+class SlotPublic(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+    local_start: datetime
+    local_end: datetime
+
+
+class AvailabilityPublic(BaseModel):
+    date: date
+    timezone: str
+    service: str
+    hair_length: str
+    duration_minutes: int
+    closed: bool
+    slots: list[SlotPublic]
+
+
+class LiveStatus(BaseModel):
+    status: str
+
+
+class ReadyStatus(BaseModel):
+    status: str
+    database: str
+    schema_revision: str | None = None
+
+
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PHONE_PATTERN = re.compile(r"^\+?[0-9 ().-]{7,20}$")
+
+
+class PrepareBookingRequest(BaseModel):
+    """Everything is untrusted input, whether typed into the form or passed by the assistant."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    service: str = Field(min_length=1, max_length=64)
+    hair_length: str = Field(min_length=1, max_length=32)
+    starts_at: AwareDatetime
+    customer_name: str = Field(min_length=1, max_length=80)
+    customer_email: str | None = Field(default=None, max_length=254)
+    customer_phone: str | None = Field(default=None, max_length=20)
+
+    @field_validator("customer_email")
+    @classmethod
+    def valid_email(cls, value: str | None) -> str | None:
+        if value in (None, ""):
+            return None
+        if not EMAIL_PATTERN.match(value):
+            raise ValueError("not a valid email address")
+        return value.lower()
+
+    @field_validator("customer_phone")
+    @classmethod
+    def valid_phone(cls, value: str | None) -> str | None:
+        if value in (None, ""):
+            return None
+        if not PHONE_PATTERN.match(value):
+            raise ValueError("not a valid phone number")
+        return value
+
+    @model_validator(mode="after")
+    def has_contact(self) -> "PrepareBookingRequest":
+        if self.customer_email is None and self.customer_phone is None:
+            raise ValueError("an email address or phone number is required")
+        return self
+
+
+class BookingSummary(BaseModel):
+    service: str
+    hair_length: str
+    customer_name: str
+    customer_email: str | None
+    customer_phone: str | None
+    starts_at: datetime
+    local_start: datetime
+    local_end: datetime
+    timezone: str
+    duration_minutes: int
+    price_cents: int
+
+
+class PreparedBooking(BaseModel):
+    confirmation_token: str
+    summary_hash: str
+    expires_at: datetime
+    summary: BookingSummary
+
+
+class ConfirmBookingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation_token: str = Field(min_length=20, max_length=128)
+    summary_hash: str = Field(min_length=64, max_length=64)
+
+
+class BookingConfirmation(BaseModel):
+    reference: str
+    status: str
+    summary: BookingSummary
+
+
+class StaffLogin(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class StaffPublic(BaseModel):
+    email: str
+    display_name: str
+
+
+class StaffLoginResult(BaseModel):
+    token: str
+    expires_at: datetime
+    staff: StaffPublic
+
+
+class StaffBooking(BaseModel):
+    reference: str
+    status: str
+    service: str
+    hair_length: str
+    customer_name: str
+    customer_email: str | None
+    customer_phone: str | None
+    starts_at: datetime
+    local_start: datetime
+    local_end: datetime
+    price_cents: int
+    created_at: datetime
+    cancelled_at: datetime | None
+    source: Literal["form", "voice"]
+
+
+class StaffBlock(BaseModel):
+    id: uuid.UUID
+    starts_at: datetime
+    ends_at: datetime
+    local_start: datetime
+    local_end: datetime
+    reason: str
+
+
+class BlockRequest(BaseModel):
+    """Wall-clock dates and times in the business time zone."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    start_date: date
+    start_time: time
+    end_date: date
+    end_time: time
+    reason: str = Field(default="", max_length=200)
+
+
+class BlockCreated(BaseModel):
+    block: StaffBlock
+    conflicts: list[StaffBooking]
+
+
+class StaffMetrics(BaseModel):
+    upcoming_bookings: int
+    bookings_last_7_days: int
+    cancellations_last_7_days: int
+    voice_bookings_last_7_days: int
+    voice_sessions_last_7_days: int
+    open_callbacks: int
+    tool_failures_last_7_days: int
+    # Voice reply time over the last 7 days. None until a call has been measured.
+    voice_replies_measured: int
+    voice_reply_median_ms: int | None
+    voice_reply_p90_ms: int | None
+
+
+class StaffCallback(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    phone: str | None
+    email: str | None
+    reason: str
+    note: str
+    status: str
+    created_at: datetime
+    resolved_at: datetime | None
+
+
+class VoiceSessionStarted(BaseModel):
+    session_id: uuid.UUID
+    session_token: str
+    mode: Literal["test", "live"]
+    client_secret: str | None
+    expires_at: datetime | None
+    max_duration_seconds: int
+
+
+class VoiceUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_tokens: int = Field(ge=0, le=10_000_000)
+    output_tokens: int = Field(ge=0, le=10_000_000)
+    responses: int = Field(ge=0, le=10_000)
+    # Replies stopped by a limit or filter, and replies the caller talked over.
+    incomplete_responses: int = Field(default=0, ge=0, le=10_000)
+    interrupted_responses: int = Field(default=0, ge=0, le=10_000)
+    # Caller turns with no words, such as background noise.
+    empty_turns: int = Field(default=0, ge=0, le=10_000)
+    # Milliseconds from the end of each caller turn to the start of the reply's audio,
+    # measured in the browser.
+    reply_latency_ms: list[Annotated[int, Field(ge=0, le=120_000)]] = Field(
+        default_factory=list, max_length=200
+    )
+
+
+class VoiceEndRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_token: str = Field(min_length=20, max_length=128)
+    reason: Literal["user_ended", "timeout", "error", "disconnected", "mic_denied", "page_closed"]
+    usage: VoiceUsage | None = None
+
+
+class VoiceToolRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_token: str = Field(min_length=20, max_length=128)
+    # The raw JSON string the model produced. Parsed and validated by the backend.
+    arguments: str = Field(default="", max_length=4000)
+
+
+class VoiceToolResult(BaseModel):
+    ok: bool
+    # Sent back to the model.
+    result: dict
+    # Shown on screen only. Holds the confirmation token, which the model never sees.
+    prepared: PreparedBooking | None = None

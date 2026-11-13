@@ -1,0 +1,53 @@
+# Local development only. Credentials here are throwaway and bound to localhost.
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: salon
+      POSTGRES_PASSWORD: salon
+      POSTGRES_DB: salon
+    ports:
+      - "127.0.0.1:5441:5432"
+    volumes:
+      - salon-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U salon -d salon"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+psycopg://salon:salon@db:5432/salon
+      CORS_ALLOWED_ORIGINS: http://localhost:5174
+      BUSINESS_SLUG: shearline-demo
+      SEED_DEMO_DATA: "true"
+    command: ["./scripts/start.sh", "--reload"]
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/migrations:/app/migrations
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8001
+    ports:
+      - "127.0.0.1:5174:5174"
+    volumes:
+      - ./frontend:/app
+      - salon-node-modules:/app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  salon-db:
+  salon-node-modules:
